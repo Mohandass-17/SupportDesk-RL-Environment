@@ -1,249 +1,176 @@
-#!/usr/bin/env python3
 """
-SupportDesk RL — Baseline Inference Script
-Runs an LLM agent through all 3 tasks and logs results in OpenEnv format.
+inference.py — SupportDesk-OpenEnv agent runner.
 
 Required env vars:
-  HF_TOKEN    — Hugging Face API token (required)
-  API_BASE_URL — LLM endpoint (default: https://api.openai.com/v1)
-  MODEL_NAME   — Model identifier (default: gpt-4o-mini)
+  HF_TOKEN      Hugging Face token (used as OpenAI-compatible API key)
+  API_BASE_URL  (optional) defaults to https://api.openai.com/v1
+  MODEL_NAME    (optional) defaults to gpt-4.1-mini
+  SEED          (optional) integer seed for reproducibility
 """
+
 import os
-import sys
-import json
 import re
-
-# ---------------------------------------------------------------------------
-# Environment variable configuration (required by OpenEnv spec)
-# ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN = os.getenv("HF_TOKEN")
-
-if HF_TOKEN is None:
-    raise ValueError(
-        "HF_TOKEN environment variable is required. "
-        "Set it to your Hugging Face API token before running."
-    )
-
-# ---------------------------------------------------------------------------
-# Import OpenAI client (required by OpenEnv spec)
-# ---------------------------------------------------------------------------
+import json
+import sys
 from openai import OpenAI
+from env.environment import SupportDeskEnv
+
+# ── Config ─────────────────────────────────────────────────────────────────
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME", "gpt-4.1-mini")
+HF_TOKEN     = os.getenv("HF_TOKEN")
+SEED         = int(os.getenv("SEED", "42"))
+MAX_EPISODES = int(os.getenv("MAX_EPISODES", "1"))
+
+if not HF_TOKEN:
+    print("[ERROR] HF_TOKEN environment variable is required.", file=sys.stderr)
+    sys.exit(1)
 
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+env    = SupportDeskEnv(seed=SEED)
 
-# ---------------------------------------------------------------------------
-# Import environment directly (avoids needing a running server for eval)
-# ---------------------------------------------------------------------------
-try:
-    from supportdesk_env.server.environment import SupportDeskEnvironment
-    from supportdesk_env.models import SupportAction
-except ImportError:
-    # Running from repo root without the package installed
-    import sys, os
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from supportdesk_env.server.environment import SupportDeskEnvironment
-    from supportdesk_env.models import SupportAction
+# ── Prompt helpers ─────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """You are an expert AI support desk agent. 
+Your job is to decide the correct action for each customer support ticket.
+
+VALID ACTIONS (reply with EXACTLY one):
+  classify_ticket  — ticket needs routing/labelling before it can be handled
+  respond_ticket   — you can resolve this directly with a helpful answer
+  escalate_ticket  — ticket involves billing fraud, security, outages, or high-severity issues
+
+Rules:
+- Reply with ONLY the action keyword on the first line.
+- Optionally add a brief explanation on subsequent lines.
+- Never invent new action names."""
 
 
-# ---------------------------------------------------------------------------
-# Task-specific prompt builders
-# ---------------------------------------------------------------------------
+def build_prompt(obs: dict) -> str:
+    ticket  = obs["ticket"]
+    kb      = obs["knowledge_base"]
+    step    = obs["step"]
+    episode = obs["episode"]
 
-def build_classification_prompt(obs) -> str:
+    kb_text = "\n".join(f"  • {entry}" for entry in kb)
+
     return (
-        "You are a customer support operations agent. "
-        "Classify the following support ticket into exactly ONE category.\n\n"
-        f"Valid categories: {', '.join(obs.valid_values or [])}\n\n"
-        f"Ticket: {obs.content}\n\n"
-        "Respond with ONLY the category name (e.g. billing_issue). No explanation."
+        f"Episode {episode} | Step {step}\n\n"
+        f"TICKET [{ticket['id']}] (Priority: {ticket['priority'].upper()})\n"
+        f"{ticket['text']}\n\n"
+        f"KNOWLEDGE BASE:\n{kb_text}\n\n"
+        f"What is the correct action? Reply with one of: "
+        f"classify_ticket | respond_ticket | escalate_ticket"
     )
 
 
-def build_resolution_prompt(obs) -> str:
-    kb = f"\nKnowledge Base:\n{obs.context}\n" if obs.context else ""
-    return (
-        "You are a customer support specialist. "
-        "Write a helpful, concise response to the customer's question "
-        "using the knowledge base provided.\n"
-        f"{kb}\n"
-        f"Customer question: {obs.content}\n\n"
-        "Your response:"
-    )
+def extract_action(raw: str) -> tuple[str, str]:
+    """
+    Extract the action keyword from the model's raw response.
+    Returns (action, response_text).
+    """
+    valid = {"classify_ticket", "respond_ticket", "escalate_ticket"}
+    lines = raw.strip().splitlines()
+
+    # Check first line for exact match
+    first = lines[0].strip().lower() if lines else ""
+    if first in valid:
+        response_text = "\n".join(lines[1:]).strip()
+        return first, response_text
+
+    # Fallback: scan full text for any valid keyword
+    for keyword in valid:
+        if keyword in raw.lower():
+            return keyword, raw
+
+    # Last resort: return raw (will be caught as invalid by env)
+    return raw.strip().lower(), ""
 
 
-def build_escalation_prompt(obs) -> str:
-    return (
-        "You are a senior support operations manager. "
-        "Read the incident report below and decide:\n"
-        "1. Should it be ESCALATED or NOT?\n"
-        "2. What priority should it be assigned? (P0=Critical outage, P1=Major, P2=Minor, P3=Enhancement)\n\n"
-        f"Incident: {obs.content}\n\n"
-        "Respond in EXACTLY this format (no extra text):\n"
-        "DECISION: escalate|no_escalate\n"
-        "PRIORITY: P0|P1|P2|P3"
-    )
+# ── Episode runner ─────────────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Action parsers — convert raw LLM text to SupportAction
-# ---------------------------------------------------------------------------
-
-def parse_classification_action(text: str, valid_values: list) -> SupportAction:
-    text_clean = text.strip().lower().replace(" ", "_").replace("-", "_")
-    # Try exact match first
-    for v in valid_values:
-        if v.lower() == text_clean:
-            return SupportAction(action_type="classify", value=v)
-    # Try substring match
-    for v in valid_values:
-        if v.lower() in text_clean or text_clean in v.lower():
-            return SupportAction(action_type="classify", value=v)
-    # Default fallback
-    return SupportAction(action_type="classify", value=text_clean[:64])
-
-
-def parse_resolution_action(text: str) -> SupportAction:
-    return SupportAction(action_type="respond", value=text.strip()[:512])
-
-
-def parse_escalation_action(text: str) -> SupportAction:
-    text_up = text.upper()
-    # Extract decision
-    decision = "escalate"
-    if "NO_ESCALATE" in text_up or "NO ESCALATE" in text_up or "NOT ESCALATE" in text_up:
-        decision = "no_escalate"
-    elif "ESCALATE" in text_up:
-        decision = "escalate"
-
-    # Extract priority
-    priority = "P2"  # default
-    for p in ["P0", "P1", "P2", "P3"]:
-        if p in text_up:
-            priority = p
-            break
-
-    return SupportAction(action_type=decision, value=decision, priority=priority)
-
-
-PROMPT_BUILDERS = {
-    "ticket_classification": build_classification_prompt,
-    "ticket_resolution": build_resolution_prompt,
-    "incident_escalation": build_escalation_prompt,
-}
-
-ACTION_PARSERS = {
-    "ticket_classification": lambda text, obs: parse_classification_action(
-        text, obs.valid_values or []
-    ),
-    "ticket_resolution": lambda text, obs: parse_resolution_action(text),
-    "incident_escalation": lambda text, obs: parse_escalation_action(text),
-}
-
-TASK_BENCHMARK = "supportdesk_ops"
-MAX_STEPS_PER_TASK = 20  # safety ceiling
-
-
-# ---------------------------------------------------------------------------
-# Run one task episode
-# ---------------------------------------------------------------------------
-
-def run_task(task_id: str, env: SupportDeskEnvironment) -> None:
-    """Run one complete task episode and print OpenEnv-format logs."""
-    obs = env.reset(task_name=task_id)
-
-    # [START] line
-    print(f"[START] task={task_id} env={TASK_BENCHMARK} model={MODEL_NAME}")
-    sys.stdout.flush()
-
+def run_episode(episode_num: int) -> dict:
+    obs  = env.reset()
+    done = False
     step = 0
     rewards = []
-    done = False
-    last_error = None
+    correct = 0
+    total   = 0
 
-    while not done and step < MAX_STEPS_PER_TASK:
-        # Build prompt for current observation
-        prompt_fn = PROMPT_BUILDERS[task_id]
-        prompt = prompt_fn(obs)
+    print(f"[START] episode={episode_num} task=supportdesk model={MODEL_NAME} seed={SEED}")
 
-        # Call LLM
+    while not done and step < 20:
+        prompt = build_prompt(obs)
+
         try:
-            response = client.chat.completions.create(
+            completion = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an expert AI operations agent. "
-                            "Follow instructions precisely and respond in the exact format requested."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
                 ],
-                temperature=0.0,
-                max_tokens=256,
+                temperature=0.0,   # deterministic for eval
+                max_tokens=200,
             )
-            raw_text = response.choices[0].message.content.strip()
-            last_error = None
+            raw = completion.choices[0].message.content
         except Exception as exc:
-            raw_text = ""
-            last_error = str(exc)[:120].replace("\n", " ")
+            print(f"[ERROR] API call failed: {exc}", file=sys.stderr)
+            break
 
-        # Parse action
-        parse_fn = ACTION_PARSERS[task_id]
-        action = parse_fn(raw_text, obs)
+        action, response_text = extract_action(raw)
 
-        # Step environment
-        try:
-            obs, reward, done, info = env.step(action)
-            reward = round(float(reward), 2)
-        except Exception as exc:
-            reward = 0.0
-            done = True
-            last_error = str(exc)[:120].replace("\n", " ")
-
-        step += 1
+        obs, reward, done, info = env.step(action, response=response_text)
         rewards.append(reward)
+        step += 1
+        total += 1
+        if info.get("was_correct"):
+            correct += 1
 
-        # Sanitise action string for single-line log
-        action_str = action.value.replace("\n", " ").replace("\r", "")[:80]
-
-        # [STEP] line
-        error_field = last_error if last_error else "null"
+        error_str = info.get("error", "null")
         print(
-            f"[STEP] step={step} action={action_str} "
-            f"reward={reward:.2f} done={str(done).lower()} error={error_field}"
+            f"[STEP] step={step} ticket={info.get('ticket_id', '?')} "
+            f"action={action} correct={info.get('correct_action', '?')} "
+            f"reward={reward:.4f} done={str(done).lower()} error={error_str}"
         )
-        sys.stdout.flush()
 
-    success = done and step <= MAX_STEPS_PER_TASK
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    success      = done and (correct == total)
+    reward_list  = ",".join(f"{r:.4f}" for r in rewards)
+    total_reward = sum(rewards)
 
-    # [END] line
-    print(f"[END] success={str(success).lower()} steps={step} rewards={rewards_str}")
-    sys.stdout.flush()
+    print(
+        f"[END] episode={episode_num} success={str(success).lower()} "
+        f"steps={step} correct={correct}/{total} "
+        f"total_reward={total_reward:.4f} rewards=[{reward_list}]"
+    )
+
+    return {
+        "episode": episode_num,
+        "success": success,
+        "steps": step,
+        "correct": correct,
+        "total": total,
+        "total_reward": total_reward,
+        "rewards": rewards,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
+# ── Main ───────────────────────────────────────────────────────────────────
 
-def run_inference():
-    env = SupportDeskEnvironment()
-    tasks = ["ticket_classification", "ticket_resolution", "incident_escalation"]
-    for task_id in tasks:
-        print(f"\n{'='*60}")
-        print(f"Running task: {task_id}")
-        print(f"{'='*60}")
-        try:
-            run_task(task_id, env)
-        except Exception as exc:
-            # Always emit [END] even on exception
-            print(f"[END] success=false steps=0 rewards=")
-            print(f"ERROR: {exc}", file=sys.stderr)
-        sys.stdout.flush()
+def run():
+    all_stats = []
+    for ep in range(1, MAX_EPISODES + 1):
+        stats = run_episode(ep)
+        all_stats.append(stats)
+
+    # Aggregate summary
+    n          = len(all_stats)
+    avg_reward = sum(s["total_reward"] for s in all_stats) / n
+    win_rate   = sum(1 for s in all_stats if s["success"]) / n
+
+    print(
+        f"\n[SUMMARY] episodes={n} avg_total_reward={avg_reward:.4f} "
+        f"win_rate={win_rate:.2%}"
+    )
 
 
 if __name__ == "__main__":
-    run_inference()
+    run()

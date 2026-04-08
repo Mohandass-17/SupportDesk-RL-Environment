@@ -1,32 +1,29 @@
-name: supportdesk_env
-version: 0.1.0
+name: supportdesk-openenv
 description: >
-  SupportDesk RL is a reinforcement learning environment that simulates
-  real-world customer support operations. An AI agent learns to triage
-  incoming tickets, resolve queries using a knowledge base, and make
-  critical escalation decisions — tasks performed daily by support teams
-  at companies like Meta and Hugging Face.
-entrypoint: supportdesk_env.server.app:app
-type: http
-spec_version: "1.0"
+  AI Support Desk RL environment. Agents learn to classify, resolve,
+  and escalate customer support tickets across three difficulty levels.
+version: 2.0
+
 tasks:
-  - id: ticket_classification
-    name: "Ticket Classification"
-    description: >
-      (Easy) Classify 5 incoming customer support tickets into the correct
-      category: authentication_issue, billing_issue, technical_issue,
-      feature_request, or general_inquiry. Grader scores 1.0 for exact
-      match, 0.7 for related category, 0.0 for wrong.
-  - id: ticket_resolution
-    name: "Ticket Resolution"
-    description: >
-      (Medium) Respond to 3 customer tickets using the provided knowledge
-      base articles. Grader scores based on keyword coverage:
-      1.0 (>=80% keywords), 0.6 (>=50%), 0.3 (>=25%), 0.0 (<25%).
-  - id: incident_escalation
-    name: "Incident Escalation"
-    description: >
-      (Hard) Assess 4 production incidents and decide whether to escalate
-      (escalate | no_escalate) and assign the correct priority (P0-P3).
-      Grader scores 1.0 for correct decision + priority, 0.6 for correct
-      decision only, 0.0 for wrong escalation on critical incidents.
+  - name: ticket_classification
+    module: tasks.task_easy
+    difficulty: easy
+    max_steps: 5
+    success_threshold: 0.6
+
+  - name: ticket_resolution
+    module: tasks.task_medium
+    difficulty: medium
+    max_steps: 10
+    success_threshold: 0.75
+
+  - name: escalation_decision
+    module: tasks.task_hard
+    difficulty: hard
+    max_steps: 15
+    success_threshold: 0.90
+
+entrypoint: env.environment:SupportDeskEnv
+
+reward_range: [0.0, 1.0]
+seed: 42

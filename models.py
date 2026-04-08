@@ -1,36 +1,45 @@
-"""Typed models for SupportDesk RL Environment."""
-from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
 
 
-class SupportAction(BaseModel):
-    """Action taken by the agent in the support desk environment."""
-    action_type: str        # "classify" | "respond" | "escalate" | "close"
-    value: str              # The classification label, response text, or escalation decision
-    priority: Optional[str] = None   # "P0" | "P1" | "P2" | "P3" (for escalation task)
-    rationale: Optional[str] = None  # Optional explanation from agent
+ActionType = Literal["classify_ticket", "respond_ticket", "escalate_ticket"]
 
 
-class SupportObservation(BaseModel):
-    """Observation returned to the agent after each step."""
-    task_id: str                             # Which task is running
-    item_id: str                             # Current ticket/incident ID
-    content: str                             # The main text (ticket or incident description)
-    context: Optional[str] = None           # Additional context (KB articles, logs, metrics)
-    valid_actions: Optional[List[str]] = None  # Allowed action types for this step
-    valid_values: Optional[List[str]] = None   # Allowed values (for classification tasks)
-    step: int = 0                            # Current step in episode
-    message: str = ""                        # Feedback from last action
-    done: bool = False                       # Whether episode is over
-    reward: float = 0.0                      # Reward from last action
+class Action(BaseModel):
+    action_type: ActionType
+    ticket_id: str
+    response: Optional[str] = None
+    reasoning: Optional[str] = None
 
 
-class SupportState(BaseModel):
-    """Episode state metadata."""
-    task_id: str
-    episode_id: str
-    current_index: int = 0
-    total_items: int = 0
-    step_count: int = 0
-    total_reward: float = 0.0
-    done: bool = False
+class Ticket(BaseModel):
+    id: str
+    text: str
+    category: str
+    priority: str
+    correct_action: ActionType
+    expected_category: str
+    solution_keywords: List[str]
+
+
+class Observation(BaseModel):
+    ticket: Ticket
+    step: int
+    episode: int
+    knowledge_base: List[str] = Field(default_factory=list)
+
+
+class StepResult(BaseModel):
+    observation: Observation
+    reward: float
+    done: bool
+    info: dict
+
+
+class EpisodeStats(BaseModel):
+    episode: int
+    total_reward: float
+    steps: int
+    success: bool
+    tickets_correct: int
+    tickets_total: int

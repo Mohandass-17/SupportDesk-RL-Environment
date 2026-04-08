@@ -1,0 +1,92 @@
+[
+  {
+    "id": "T001",
+    "text": "I cannot login to my account. It says my password is wrong but I haven't changed it.",
+    "category": "authentication",
+    "priority": "medium",
+    "correct_action": "classify_ticket",
+    "expected_category": "authentication",
+    "solution_keywords": ["password reset", "account recovery", "credentials"]
+  },
+  {
+    "id": "T002",
+    "text": "How do I reset my password? I forgot it.",
+    "category": "account",
+    "priority": "low",
+    "correct_action": "respond_ticket",
+    "expected_category": "account",
+    "solution_keywords": ["forgot password", "reset link", "email"]
+  },
+  {
+    "id": "T003",
+    "text": "My credit card was charged twice for the same order. I need a refund immediately.",
+    "category": "billing",
+    "priority": "high",
+    "correct_action": "escalate_ticket",
+    "expected_category": "billing",
+    "solution_keywords": ["duplicate charge", "refund", "billing error"]
+  },
+  {
+    "id": "T004",
+    "text": "The app keeps crashing every time I open it on my iPhone 14.",
+    "category": "technical",
+    "priority": "medium",
+    "correct_action": "classify_ticket",
+    "expected_category": "technical",
+    "solution_keywords": ["crash", "iOS", "bug report"]
+  },
+  {
+    "id": "T005",
+    "text": "How do I export my data as a CSV file?",
+    "category": "how-to",
+    "priority": "low",
+    "correct_action": "respond_ticket",
+    "expected_category": "how-to",
+    "solution_keywords": ["export", "CSV", "download", "data"]
+  },
+  {
+    "id": "T006",
+    "text": "I think my account has been hacked. Someone is sending emails from my account without my knowledge.",
+    "category": "security",
+    "priority": "critical",
+    "correct_action": "escalate_ticket",
+    "expected_category": "security",
+    "solution_keywords": ["account compromised", "unauthorized access", "security breach"]
+  },
+  {
+    "id": "T007",
+    "text": "Can I change my subscription plan from monthly to annual?",
+    "category": "billing",
+    "priority": "low",
+    "correct_action": "respond_ticket",
+    "expected_category": "billing",
+    "solution_keywords": ["subscription", "plan change", "annual", "billing cycle"]
+  },
+  {
+    "id": "T008",
+    "text": "I'm getting a 500 error on the checkout page and cannot complete my purchase.",
+    "category": "technical",
+    "priority": "high",
+    "correct_action": "escalate_ticket",
+    "expected_category": "technical",
+    "solution_keywords": ["500 error", "server error", "checkout failure"]
+  },
+  {
+    "id": "T009",
+    "text": "Where can I find my invoices for the last 3 months?",
+    "category": "billing",
+    "priority": "low",
+    "correct_action": "respond_ticket",
+    "expected_category": "billing",
+    "solution_keywords": ["invoice", "billing history", "receipts"]
+  },
+  {
+    "id": "T010",
+    "text": "Your service has been down for 3 hours and I'm losing business. This is unacceptable.",
+    "category": "outage",
+    "priority": "critical",
+    "correct_action": "escalate_ticket",
+    "expected_category": "outage",
+    "solution_keywords": ["service down", "outage", "SLA", "business impact"]
+  }
+]
