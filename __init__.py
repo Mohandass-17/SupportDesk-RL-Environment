@@ -1,5 +1,5 @@
-"""SupportDesk RL — server package."""
-from .app import app
-from .environment import SupportDeskEnvironment
+"""SupportDesk RL Environment — OpenEnv Hackathon 2026."""
+from .models import SupportAction, SupportObservation, SupportState
+from .client import SupportDeskEnv
 
-__all__ = ["app", "SupportDeskEnvironment"]
+__all__ = ["SupportAction", "SupportObservation", "SupportState", "SupportDeskEnv"]
