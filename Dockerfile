@@ -1,6 +1,5 @@
 FROM python:3.10-slim
 
-# Required for Hugging Face Docker Spaces
 RUN useradd -m -u 1000 user
 
 WORKDIR /app
