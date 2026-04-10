@@ -1,10 +1,5 @@
 ---
-title: SupportDesk RL Environment
-emoji: 🎧
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-pinned: true
+# SupportDesk RL Environment
 tags:
   - openenv
   - reinforcement-learning
