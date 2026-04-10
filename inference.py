@@ -1,176 +1,106 @@
-"""
-inference.py — SupportDesk-OpenEnv agent runner.
-
-Required env vars:
-  HF_TOKEN      Hugging Face token (used as OpenAI-compatible API key)
-  API_BASE_URL  (optional) defaults to https://api.openai.com/v1
-  MODEL_NAME    (optional) defaults to gpt-4.1-mini
-  SEED          (optional) integer seed for reproducibility
-"""
-
 import os
-import re
-import json
 import sys
-from openai import OpenAI
-from env.environment import SupportDeskEnv
+import time
 
-# ── Config ─────────────────────────────────────────────────────────────────
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME", "gpt-4.1-mini")
-HF_TOKEN     = os.getenv("HF_TOKEN")
-SEED         = int(os.getenv("SEED", "42"))
-MAX_EPISODES = int(os.getenv("MAX_EPISODES", "1"))
+HF_TOKEN = os.getenv("HF_TOKEN")
+MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 
 if not HF_TOKEN:
-    print("[ERROR] HF_TOKEN environment variable is required.", file=sys.stderr)
+    print("[ERROR] HF_TOKEN is required.")
     sys.exit(1)
 
+from openai import OpenAI
+from environment import SupportDeskEnv
+
 client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-env    = SupportDeskEnv(seed=SEED)
 
-# ── Prompt helpers ─────────────────────────────────────────────────────────
+SYSTEM = "You are a support desk classifier. Reply with ONLY one word: classify_ticket, respond_ticket, or escalate_ticket"
 
-SYSTEM_PROMPT = """You are an expert AI support desk agent. 
-Your job is to decide the correct action for each customer support ticket.
+def get_action(text):
+    valid = ["escalate_ticket", "classify_ticket", "respond_ticket"]
+    text = text.strip().lower()
+    for v in valid:
+        if v in text:
+            return v
+    return "respond_ticket"
 
-VALID ACTIONS (reply with EXACTLY one):
-  classify_ticket  — ticket needs routing/labelling before it can be handled
-  respond_ticket   — you can resolve this directly with a helpful answer
-  escalate_ticket  — ticket involves billing fraud, security, outages, or high-severity issues
-
-Rules:
-- Reply with ONLY the action keyword on the first line.
-- Optionally add a brief explanation on subsequent lines.
-- Never invent new action names."""
-
-
-def build_prompt(obs: dict) -> str:
-    ticket  = obs["ticket"]
-    kb      = obs["knowledge_base"]
-    step    = obs["step"]
-    episode = obs["episode"]
-
-    kb_text = "\n".join(f"  • {entry}" for entry in kb)
-
-    return (
-        f"Episode {episode} | Step {step}\n\n"
-        f"TICKET [{ticket['id']}] (Priority: {ticket['priority'].upper()})\n"
-        f"{ticket['text']}\n\n"
-        f"KNOWLEDGE BASE:\n{kb_text}\n\n"
-        f"What is the correct action? Reply with one of: "
-        f"classify_ticket | respond_ticket | escalate_ticket"
-    )
-
-
-def extract_action(raw: str) -> tuple[str, str]:
-    """
-    Extract the action keyword from the model's raw response.
-    Returns (action, response_text).
-    """
-    valid = {"classify_ticket", "respond_ticket", "escalate_ticket"}
-    lines = raw.strip().splitlines()
-
-    # Check first line for exact match
-    first = lines[0].strip().lower() if lines else ""
-    if first in valid:
-        response_text = "\n".join(lines[1:]).strip()
-        return first, response_text
-
-    # Fallback: scan full text for any valid keyword
-    for keyword in valid:
-        if keyword in raw.lower():
-            return keyword, raw
-
-    # Last resort: return raw (will be caught as invalid by env)
-    return raw.strip().lower(), ""
-
-
-# ── Episode runner ─────────────────────────────────────────────────────────
-
-def run_episode(episode_num: int) -> dict:
-    obs  = env.reset()
+def run_episode(episode_num):
+    env = SupportDeskEnv(seed=episode_num)
+    obs = env.reset()
     done = False
     step = 0
     rewards = []
     correct = 0
-    total   = 0
 
-    print(f"[START] episode={episode_num} task=supportdesk model={MODEL_NAME} seed={SEED}")
+    print("[START] episode=" + str(episode_num) + " model=" + MODEL_NAME)
 
     while not done and step < 20:
-        prompt = build_prompt(obs)
+        ticket = obs["ticket"]
+        prompt = (
+            "Ticket: " + ticket["text"] + "\n"
+            "Priority: " + ticket["priority"] + "\n"
+            "Category: " + ticket["category"] + "\n\n"
+            "classify_ticket = bug or technical issue needing routing\n"
+            "respond_ticket = simple how-to or account question\n"
+            "escalate_ticket = fraud, hacking, outage, server error, duplicate charge\n\n"
+            "Reply with ONE word only."
+        )
 
         try:
-            completion = client.chat.completions.create(
+            res = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": prompt}
                 ],
-                temperature=0.0,   # deterministic for eval
-                max_tokens=200,
+                temperature=0.0,
+                max_tokens=20,
             )
-            raw = completion.choices[0].message.content
-        except Exception as exc:
-            print(f"[ERROR] API call failed: {exc}", file=sys.stderr)
+            raw = res.choices[0].message.content
+        except Exception as e:
+            print("[ERROR] " + str(e))
+            time.sleep(5)
             break
 
-        action, response_text = extract_action(raw)
-
-        obs, reward, done, info = env.step(action, response=response_text)
+        action = get_action(raw)
+        obs, reward, done, info = env.step(action)
         rewards.append(reward)
         step += 1
-        total += 1
+
         if info.get("was_correct"):
             correct += 1
 
-        error_str = info.get("error", "null")
         print(
-            f"[STEP] step={step} ticket={info.get('ticket_id', '?')} "
-            f"action={action} correct={info.get('correct_action', '?')} "
-            f"reward={reward:.4f} done={str(done).lower()} error={error_str}"
+            "[STEP] ep=" + str(episode_num) +
+            " step=" + str(step) +
+            " ticket=" + str(info.get("ticket_id", "?")) +
+            " action=" + action +
+            " expected=" + str(info.get("correct_action", "?")) +
+            " correct=" + str(info.get("was_correct", False)) +
+            " reward=" + str(reward)
         )
 
-    success      = done and (correct == total)
-    reward_list  = ",".join(f"{r:.4f}" for r in rewards)
-    total_reward = sum(rewards)
-
-    print(
-        f"[END] episode={episode_num} success={str(success).lower()} "
-        f"steps={step} correct={correct}/{total} "
-        f"total_reward={total_reward:.4f} rewards=[{reward_list}]"
-    )
-
-    return {
-        "episode": episode_num,
-        "success": success,
-        "steps": step,
-        "correct": correct,
-        "total": total,
-        "total_reward": total_reward,
-        "rewards": rewards,
-    }
-
-
-# ── Main ───────────────────────────────────────────────────────────────────
-
-def run():
-    all_stats = []
-    for ep in range(1, MAX_EPISODES + 1):
-        stats = run_episode(ep)
-        all_stats.append(stats)
-
-    # Aggregate summary
-    n          = len(all_stats)
-    avg_reward = sum(s["total_reward"] for s in all_stats) / n
-    win_rate   = sum(1 for s in all_stats if s["success"]) / n
-
-    print(
-        f"\n[SUMMARY] episodes={n} avg_total_reward={avg_reward:.4f} "
-        f"win_rate={win_rate:.2%}"
-    )
-
+    total = round(sum(rewards), 4)
+    print("[END] episode=" + str(episode_num) +
+          " correct=" + str(correct) + "/" + str(step) +
+          " total_reward=" + str(total))
+    return total
 
 if __name__ == "__main__":
-    run()
+    print("[SYSTEM] SupportDesk-OpenEnv is running...")
+    episode = 1
+    all_rewards = []
+
+    while True:
+        try:
+            r = run_episode(episode)
+            all_rewards.append(r)
+            avg = round(sum(all_rewards) / len(all_rewards), 4)
+            print("[SUMMARY] episodes=" + str(episode) + " avg_reward=" + str(avg))
+            episode += 1
+            print("[SYSTEM] Waiting 30 seconds before next episode...")
+            time.sleep(30)
+        except Exception as e:
+            print("[ERROR] " + str(e))
+            time.sleep(10)
